@@ -28,6 +28,7 @@ from classifier_utils import PaddingInputExample
 from classifier_utils import convert_single_example
 from prepro_utils import preprocess_text, encode_ids
 
+import metrics
 
 # Model
 flags.DEFINE_string("model_config_path", default=None,
@@ -543,9 +544,35 @@ def get_model_fn(n_class):
         accuracy = tf.metrics.accuracy(**eval_input_dict)
 
         loss = tf.metrics.mean(values=per_example_loss, weights=is_real_example)
+        ################################### 
+        #  precision,recall, f1 score     #
+        ###################################
+        precision = metrics.precision(label_ids,predictions,20,average="macro")
+        recall = metrics.recall(label_ids,predictions,20,average="macro")
+        f = metrics.f1(label_ids,predictions,20,average="macro")
+        
+        ################################### 
+        #      confusion matrix           #
+        ###################################
+        
+        def eval_confusion_matrix(labels, predictions, num_classes):
+          with tf.variable_scope("eval_confusion_matrix"):
+            con_matrix = tf.confusion_matrix(labels=labels, predictions=predictions, num_classes=num_classes)
+
+            con_matrix_sum = tf.Variable(tf.zeros(shape=(num_classes,num_classes), dtype=tf.int32),
+                                                trainable=False,
+                                                name="confusion_matrix_result",
+                                                collections=[tf.GraphKeys.LOCAL_VARIABLES])
+            update_op = tf.assign_add(con_matrix_sum, con_matrix)
+            return tf.convert_to_tensor(con_matrix_sum), update_op
         return {
             'eval_accuracy': accuracy,
-            'eval_loss': loss}
+            'eval_loss': loss,
+            "eval_precision":precision,
+            "eval_recall":recall,
+            "eval_f": f,
+            "conf_mat": eval_confusion_matrix(label_ids,predictions,num_classes=20)
+            }
 
       def regression_metric_fn(
           per_example_loss, label_ids, logits, is_real_example):
