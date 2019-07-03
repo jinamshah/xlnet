@@ -71,7 +71,7 @@ flags.DEFINE_string("data_dir", default="",
       help="Directory for input data.")
 
 # TPUs and machines
-flags.DEFINE_bool("use_tpu", default=False, help="whether to use TPU.")
+flags.DEFINE_bool("use_tpu", default=True, help="whether to use TPU.")
 flags.DEFINE_integer("num_hosts", default=1, help="How many TPU hosts.")
 flags.DEFINE_integer("num_core_per_host", default=8,
       help="8 for TPU v2 and v3-8, 16 for larger TPU v3 pod. In the context "
@@ -141,6 +141,8 @@ flags.DEFINE_bool("is_regression", default=False,
 
 FLAGS = flags.FLAGS
 
+import sys
+FLAGS(sys.argv)
 
 class InputExample(object):
   """A single training/test example for simple sequence classification."""
@@ -519,6 +521,7 @@ def get_model_fn(n_class):
       (total_loss, per_example_loss, logits
           ) = function_builder.get_regression_loss(FLAGS, features, is_training)
     else:
+      tf.logging.info(FLAGS)
       (total_loss, per_example_loss, logits
           ) = function_builder.get_classification_loss(
           FLAGS, features, n_class, is_training)
@@ -547,9 +550,9 @@ def get_model_fn(n_class):
         ################################### 
         #  precision,recall, f1 score     #
         ###################################
-        precision = metrics.precision(label_ids,predictions,20,average="macro")
-        recall = metrics.recall(label_ids,predictions,20,average="macro")
-        f = metrics.f1(label_ids,predictions,20,average="macro")
+        precision = metrics.precision(label_ids,predictions,n_class,average="macro")
+        recall = metrics.recall(label_ids,predictions,n_class,average="macro")
+        f = metrics.f1(label_ids,predictions,n_class,average="macro")
         
         ################################### 
         #      confusion matrix           #
@@ -571,7 +574,7 @@ def get_model_fn(n_class):
             "eval_precision":precision,
             "eval_recall":recall,
             "eval_f": f,
-            "conf_mat": eval_confusion_matrix(label_ids,predictions,num_classes=20)
+            "conf_mat": eval_confusion_matrix(label_ids,predictions,num_classes=n_class)
             }
 
       def regression_metric_fn(
