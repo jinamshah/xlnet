@@ -4,6 +4,7 @@ from __future__ import print_function
 
 from os.path import join
 from absl import flags
+
 import os
 import sys
 import csv
@@ -31,11 +32,12 @@ from prepro_utils import preprocess_text, encode_ids
 import metrics
 
 # Model
-flags.DEFINE_string("model_config_path", default=None,
+# flags = tf.app.flags
+flags.DEFINE_string("model_config_path", default='gs://eu-bucket-sa_detection/xlnet_cased_L-24_H-1024_A-16/xlnet_config.json',
       help="Model config path.")
 flags.DEFINE_float("dropout", default=0.1,
       help="Dropout rate.")
-flags.DEFINE_float("dropatt", default=0.1,
+flags.DEFINE_float("dropatt", default=0.01,
       help="Attention dropout rate.")
 flags.DEFINE_integer("clamp_len", default=-1,
       help="Clamp length")
@@ -65,7 +67,7 @@ flags.DEFINE_string("output_dir", default="",
       help="Output dir for TF records.")
 flags.DEFINE_string("spiece_model_file", default="",
       help="Sentence Piece model path.")
-flags.DEFINE_string("model_dir", default="",
+flags.DEFINE_string("model_dir", default="gs://eu-bucket-sa_detection/sa1_5/xlnet_large/norm-512-v4/",
       help="Directory for saving the finetuned model.")
 flags.DEFINE_string("data_dir", default="",
       help="Directory for input data.")
@@ -86,26 +88,28 @@ flags.DEFINE_integer("iterations", default=1000,
 
 # training
 flags.DEFINE_bool("do_train", default=False, help="whether to do training")
-flags.DEFINE_integer("train_steps", default=1000,
+# 54473 
+# 108948
+flags.DEFINE_integer("train_steps", default=54474,
       help="Number of training steps")
 flags.DEFINE_integer("warmup_steps", default=0, help="number of warmup steps")
-flags.DEFINE_float("learning_rate", default=1e-5, help="initial learning rate")
+flags.DEFINE_float("learning_rate", default=1e-3, help="initial learning rate")
 flags.DEFINE_float("lr_layer_decay_rate", 1.0,
                    "Top layer: lr[L] = FLAGS.learning_rate."
                    "Low layer: lr[l-1] = lr[l] * lr_layer_decay_rate.")
-flags.DEFINE_float("min_lr_ratio", default=0.0,
+flags.DEFINE_float("min_lr_ratio", default=0.0,  #10 next iter
       help="min lr ratio for cos decay.")
 flags.DEFINE_float("clip", default=1.0, help="Gradient clipping")
-flags.DEFINE_integer("max_save", default=0,
+flags.DEFINE_integer("max_save", default=5,
       help="Max number of checkpoints to save. Use 0 to save all.")
 flags.DEFINE_integer("save_steps", default=None,
       help="Save the model for every save_steps. "
       "If None, not to save any model.")
-flags.DEFINE_integer("train_batch_size", default=8,
+flags.DEFINE_integer("train_batch_size", default=32,
       help="Batch size for training")
 flags.DEFINE_float("weight_decay", default=0.00, help="Weight decay rate")
 flags.DEFINE_float("adam_epsilon", default=1e-8, help="Adam epsilon")
-flags.DEFINE_string("decay_method", default="poly", help="poly or cos")
+flags.DEFINE_string("decay_method", default="cos", help="poly or cos")
 
 # evaluation
 flags.DEFINE_bool("do_eval", default=False, help="whether to do eval")
@@ -119,14 +123,14 @@ flags.DEFINE_integer("predict_batch_size", default=128,
       help="batch size for prediction.")
 flags.DEFINE_string("predict_dir", default=None,
       help="Dir for saving prediction files.")
-flags.DEFINE_bool("eval_all_ckpt", default=False,
+flags.DEFINE_bool("eval_all_ckpt", default=True,
       help="Eval all ckpts. If False, only evaluate the last one.")
 flags.DEFINE_string("predict_ckpt", default=None,
       help="Ckpt path for do_predict. If None, use the last one.")
 
 # task specific
-flags.DEFINE_string("task_name", default=None, help="Task name")
-flags.DEFINE_integer("max_seq_length", default=128, help="Max sequence length")
+flags.DEFINE_string("task_name", default="norm-512-v1", help="Task name")
+flags.DEFINE_integer("max_seq_length", default=512, help="Max sequence length")
 flags.DEFINE_integer("shuffle_buffer", default=2048,
       help="Buffer size used for shuffle.")
 flags.DEFINE_integer("num_passes", default=1,
@@ -139,11 +143,10 @@ flags.DEFINE_string("cls_scope", default=None,
 flags.DEFINE_bool("is_regression", default=False,
       help="Whether it's a regression task.")
 
+flags.DEFINE_string('f', '', 'kernel')
 FLAGS = flags.FLAGS
-
 import sys
 FLAGS(sys.argv)
-
 class InputExample(object):
   """A single training/test example for simple sequence classification."""
 
@@ -443,11 +446,71 @@ def file_based_convert_examples_to_features(
     writer.write(tf_example.SerializeToString())
   writer.close()
 
+def input_fn_builder(features, seq_length, is_training, drop_remainder):
+  """Creates an `input_fn` closure to be passed to TPUEstimator."""
+
+  all_input_ids = []
+  all_input_mask = []
+  all_segment_ids = []
+  all_label_ids = []
+
+  for feature in features:
+    all_input_ids.append(feature.input_ids)
+    all_input_mask.append(feature.input_mask)
+    all_segment_ids.append(feature.segment_ids)
+    all_label_ids.append(feature.label_id)
+
+  def input_fn(params,input_context=None):
+    """The actual input function."""
+    if FLAGS.use_tpu:
+      batch_size = params["batch_size"]
+    elif is_training:
+      batch_size = FLAGS.train_batch_size
+    elif FLAGS.do_eval:
+      batch_size = FLAGS.eval_batch_size
+    else:
+      batch_size = FLAGS.predict_batch_size
+
+    num_examples = len(features)
+
+    # This is for demo purposes and does NOT scale to large data sets. We do
+    # not use Dataset.from_generator() because that uses tf.py_func which is
+    # not TPU compatible. The right way to load data is with TFRecordReader.
+    d = tf.data.Dataset.from_tensor_slices({
+        "input_ids":
+            tf.constant(
+                all_input_ids, shape=[num_examples, seq_length],
+                dtype=tf.int32),
+        "input_mask":
+            tf.constant(
+                all_input_mask,
+                shape=[num_examples, seq_length],
+                dtype=tf.float32),
+        "segment_ids":
+            tf.constant(
+                all_segment_ids,
+                shape=[num_examples, seq_length],
+                dtype=tf.int32),
+        "label_ids":
+            tf.constant(all_label_ids, shape=[num_examples], dtype=tf.int32),
+    })
+    if input_context is not None:
+      tf.logging.info("Input pipeline id %d out of %d",
+          input_context.input_pipeline_id, input_context.num_replicas_in_sync)
+      d = d.shard(input_context.num_input_pipelines,
+                  input_context.input_pipeline_id)
+    if is_training:
+      d = d.repeat()
+      d = d.shuffle(buffer_size=100)
+
+    d = d.batch(batch_size=batch_size, drop_remainder=drop_remainder)
+    return d
+
+  return input_fn
 
 def file_based_input_fn_builder(input_file, seq_length, is_training,
                                 drop_remainder):
   """Creates an `input_fn` closure to be passed to TPUEstimator."""
-
 
   name_to_features = {
       "input_ids": tf.FixedLenFeature([seq_length], tf.int64),
@@ -521,8 +584,25 @@ def get_model_fn(n_class):
       (total_loss, per_example_loss, logits
           ) = function_builder.get_regression_loss(FLAGS, features, is_training)
     else:
-      tf.logging.info(FLAGS)
-      (total_loss, per_example_loss, logits
+      flag_val_dict = {
+           "dropout" : FLAGS.dropout,
+           "model_dir" : FLAGS.model_dir,
+           "data_dir" : FLAGS.data_dir,
+           "use_tpu" : FLAGS.use_tpu,
+           "num_core_per_host" : FLAGS.num_core_per_host,
+           "master" : FLAGS.master,
+           "iterations" : FLAGS.iterations,
+           "learning_rate" : FLAGS.learning_rate,
+           "train_batch_size" : FLAGS.train_batch_size,
+           "model_config_path" : FLAGS.model_config_path,
+      }
+      for name in list(features.keys()):
+        t = features[name]
+        if t.dtype == tf.int64:
+          t = tf.cast(t, tf.int32)
+        features[name] = t
+      tf.logging.info(json.dumps(flag_val_dict))
+      (total_loss, per_example_loss, logits, probabilities
           ) = function_builder.get_classification_loss(
           FLAGS, features, n_class, is_training)
 
@@ -550,9 +630,9 @@ def get_model_fn(n_class):
         ################################### 
         #  precision,recall, f1 score     #
         ###################################
-        precision = metrics.precision(label_ids,predictions,n_class,average="macro")
-        recall = metrics.recall(label_ids,predictions,n_class,average="macro")
-        f = metrics.f1(label_ids,predictions,n_class,average="macro")
+        precision = metrics.precision(label_ids,predictions,20,average="macro")
+        recall = metrics.recall(label_ids,predictions,20,average="macro")
+        f = metrics.f1(label_ids,predictions,20,average="macro")
         
         ################################### 
         #      confusion matrix           #
@@ -574,7 +654,7 @@ def get_model_fn(n_class):
             "eval_precision":precision,
             "eval_recall":recall,
             "eval_f": f,
-            "conf_mat": eval_confusion_matrix(label_ids,predictions,num_classes=n_class)
+            "conf_mat": eval_confusion_matrix(label_ids,predictions,num_classes=20)
             }
 
       def regression_metric_fn(
@@ -615,17 +695,16 @@ def get_model_fn(n_class):
       predictions = {
           "logits": logits,
           "labels": label_ids,
-          "is_real": features["is_real_example"]
+#           "is_real": features["is_real_example"]
       }
 
       if FLAGS.use_tpu:
         output_spec = tf.contrib.tpu.TPUEstimatorSpec(
-            mode=mode, predictions=predictions, scaffold_fn=scaffold_fn)
+            mode=mode, predictions={"probabilities": probabilities}, scaffold_fn=scaffold_fn)
       else:
         output_spec = tf.estimator.EstimatorSpec(
-            mode=mode, predictions=predictions)
+            mode=mode, predictions={"probabilities": probabilities})
       return output_spec
-
     #### Configuring the optimizer
     train_op, learning_rate, _ = model_utils.get_train_op(FLAGS, total_loss)
 
@@ -883,3 +962,7 @@ def main(_):
 
 if __name__ == "__main__":
   tf.app.run()
+  for key, value in tf.flags.FLAGS.__flags.items():
+    print(key,value)
+
+# file_based_input_fn_builder
